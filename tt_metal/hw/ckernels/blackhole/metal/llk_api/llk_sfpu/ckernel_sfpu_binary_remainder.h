@@ -61,6 +61,7 @@ sfpi_inline sfpi::vInt compute_unsigned_remainder_int32(const sfpi::vInt& a_sign
     b_hi = sfpi::fractional_mul(correction, b_hi);
     sfpi::vInt tmp = tmp_lo + ((tmp_hi + b_hi) << 23);
 
+#if 0
     // Extract sign mask of r
     // r_sign = 0 if r >= 0, -1 if r < 0
     sfpi::vInt r_sign = r >> 31;
@@ -69,6 +70,11 @@ sfpi_inline sfpi::vInt compute_unsigned_remainder_int32(const sfpi::vInt& a_sign
     // If r < 0  -> r += tmp
     // Else      -> r -= tmp
     sfpi::vInt signed_tmp = (tmp ^ r_sign) - r_sign;
+#else
+    sfpi::vInt signed_tmp{tmp};
+    v_if(r < 0) { signed_tmp = -signed_tmp; }
+    v_endif;
+#endif
     r -= signed_tmp;
 
     // Final adjustment to ensure r is in [0, b)
@@ -128,8 +134,8 @@ sfpi_inline sfpi::vFloat _sfpu_binary_remainder_(sfpi::vFloat in0, sfpi::vFloat 
     // Sign correction: remainder must match the sign of b (or be zero).
     // XOR of the float bit-patterns detects sign mismatch via the MSB,
     // avoiding a compound conditional with four comparisons and an OR.
-    v_if(result != sfpi::vFloat(0.0f)) {
-        sfpi::vInt signs = sfpi::reinterpret<sfpi::vUInt>(result) ^ sfpi::reinterpret<sfpi::vUInt>(b);
+    v_if(result != 0.0f) {
+        sfpi::vInt signs = sfpi::as<sfpi::vInt>(result) ^ sfpi::as<sfpi::vInt>(b);
         v_and(signs < 0);
         result += b;
     }

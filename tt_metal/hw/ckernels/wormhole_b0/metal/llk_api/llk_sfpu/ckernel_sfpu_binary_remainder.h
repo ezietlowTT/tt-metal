@@ -76,12 +76,12 @@ sfpi_inline sfpi::vInt compute_unsigned_remainder_int32(const sfpi::vInt& a_sign
     sfpi::vFloat lo = q1 * b0 + MANTISSA_ALIGNMENT_OFFSET;
     hi = q1 * b1 + hi;
 
-    sfpi::vInt qb = sfpi::exman(lo) << 11;
+    sfpi::vUInt qb = sfpi::exman(lo) << 11;
     qb += sfpi::exman(hi) << 22;
 
     // Compute remainder - recompute abs(a_signed)
     a = sfpi::abs(a_signed);
-    sfpi::vInt r = a - qb;
+    sfpi::vInt r{a - qb};
 
     // Use abs(r) for correction computation
     sfpi::vFloat r_f = sfpi::convert<sfpi::vFloat>(sfpi::abs(r), sfpi::RoundMode::NearestEven);
@@ -102,19 +102,27 @@ sfpi_inline sfpi::vInt compute_unsigned_remainder_int32(const sfpi::vInt& a_sign
     sfpi::vFloat mid = correction_f * b1 + MANTISSA_ALIGNMENT_OFFSET;
     sfpi::vFloat top = correction_f * b2 + MANTISSA_ALIGNMENT_OFFSET;
 
-    sfpi::vInt tmp = sfpi::exman(low);
+    sfpi::vUInt tmp = sfpi::exman(low);
     tmp += sfpi::exman(mid) << 11;
     tmp += sfpi::exman(top) << 22;
 
+#if 0
     // Extract sign mask of r
     // r_sign = 0 if r >= 0, -1 if r < 0
-    sfpi::vInt r_sign = sfpi::reinterpret<sfpi::vInt>(sfpi::reinterpret<sfpi::vUInt>(r) >> 31);
+    sfpi::vInt r_sign = sfpi::as<sfpi::vInt>(sfpi::as<sfpi::vUInt>(r) >> 31);
     r_sign = -r_sign;
 
     // Apply correction with sign of r
     // If r < 0  -> r += tmp
     // Else      -> r -= tmp
     sfpi::vInt signed_tmp = (tmp ^ r_sign) - r_sign;
+    // 4 insns
+#else
+    sfpi::vInt signed_tmp{tmp};
+    v_if(r < 0) { signed_tmp = -signed_tmp; }
+    v_endif;
+    // 3 insns
+#endif
     r -= signed_tmp;
 
     // Final adjustment - recompute b to reduce register pressure
@@ -176,7 +184,7 @@ sfpi_inline sfpi::vFloat _sfpu_binary_remainder_(sfpi::vFloat in0, sfpi::vFloat 
     // XOR of the float bit-patterns detects sign mismatch via the MSB,
     // avoiding a compound conditional with four comparisons and an OR.
     v_if(result != sfpi::vFloat(0.0f)) {
-        sfpi::vInt signs = sfpi::reinterpret<sfpi::vUInt>(result) ^ sfpi::reinterpret<sfpi::vUInt>(b);
+        sfpi::vInt signs = sfpi::reinterpret<sfpi::vInt>(result) ^ sfpi::reinterpret<sfpi::vInt>(b);
         v_and(signs < 0);
         result += b;
     }
