@@ -26,6 +26,30 @@ class HardwareConfig:
         )
 
 
+def detect_hardware() -> "HardwareConfig":
+    """Open device briefly, read grid dimensions, match against KNOWN_CONFIGS.
+
+    Closes the device handle before returning so callers can open their own.
+    Accepts an optional already-open device to skip open/close.
+    """
+    import ttnn as _ttnn
+    device = _ttnn.open_device(device_id=0)
+    try:
+        g = device.compute_with_storage_grid_size()
+        dram = device.dram_size_per_bank() * device.num_dram_channels()
+    finally:
+        _ttnn.close_device(device)
+
+    for cfg in KNOWN_CONFIGS.values():
+        if cfg.grid_x == g.x and cfg.grid_y == g.y:
+            return cfg
+
+    raise RuntimeError(
+        f"Unknown hardware: grid={g.x}x{g.y}, dram={dram // 1024**3}GB. "
+        f"Add an entry to ttnn/ttnn/hardware.py KNOWN_CONFIGS and file an issue."
+    )
+
+
 KNOWN_CONFIGS: dict[str, HardwareConfig] = {
     "bh_p150_1card": HardwareConfig(
         name="bh_p150_1card", grid_x=13, grid_y=10,
