@@ -30,13 +30,12 @@ def detect_hardware() -> "HardwareConfig":
     """Open device briefly, read grid dimensions, match against KNOWN_CONFIGS.
 
     Closes the device handle before returning so callers can open their own.
-    Accepts an optional already-open device to skip open/close.
+    Matches on compute grid (x, y) — sufficient to identify all current configs.
     """
     import ttnn as _ttnn
     device = _ttnn.open_device(device_id=0)
     try:
         g = device.compute_with_storage_grid_size()
-        dram = device.dram_size_per_bank() * device.num_dram_channels()
     finally:
         _ttnn.close_device(device)
 
@@ -45,7 +44,7 @@ def detect_hardware() -> "HardwareConfig":
             return cfg
 
     raise RuntimeError(
-        f"Unknown hardware: grid={g.x}x{g.y}, dram={dram // 1024**3}GB. "
+        f"Unknown hardware: grid={g.x}x{g.y}. "
         f"Add an entry to ttnn/ttnn/hardware.py KNOWN_CONFIGS and file an issue."
     )
 
