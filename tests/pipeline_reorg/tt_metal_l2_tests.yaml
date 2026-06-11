@@ -264,9 +264,9 @@
 - name: ttnn nightly data_movement tests
   cmd: 'pytest tests/ttnn/nightly/unit_tests/operations/data_movement -xv -m "not disable_fast_runtime_mode" --timeout=600'
   skus:
-    wh_n150:
+    wh_n150_civ2:
       timeout: 40
-    wh_n300:
+    wh_n300_civ2:
       timeout: 40
     bh_p100:
       timeout: 40
@@ -281,9 +281,9 @@
   # nightly in 3 split groups to cover the long tail that the PR gate skips.
   cmd: 'pytest tests/ttnn/unit_tests/operations/data_movement tests/ttnn/unit_tests/operations/ccl tests/ttnn/unit_tests/operations/point_to_point --splits 3 --group 1 -xv -m "not disable_fast_runtime_mode" --timeout=300'
   skus:
-    wh_n150:
+    wh_n150_civ2:
       timeout: 35
-    wh_n300:
+    wh_n300_civ2:
       timeout: 35
     bh_p100:
       timeout: 35
@@ -296,9 +296,9 @@
 - name: ttnn nightly data_movement ccl tests group 2
   cmd: 'pytest tests/ttnn/unit_tests/operations/data_movement tests/ttnn/unit_tests/operations/ccl tests/ttnn/unit_tests/operations/point_to_point --splits 3 --group 2 -xv -m "not disable_fast_runtime_mode" --timeout=300'
   skus:
-    wh_n150:
+    wh_n150_civ2:
       timeout: 35
-    wh_n300:
+    wh_n300_civ2:
       timeout: 35
     bh_p100:
       timeout: 35
@@ -311,9 +311,9 @@
 - name: ttnn nightly data_movement ccl tests group 3
   cmd: 'pytest tests/ttnn/unit_tests/operations/data_movement tests/ttnn/unit_tests/operations/ccl tests/ttnn/unit_tests/operations/point_to_point --splits 3 --group 3 -xv -m "not disable_fast_runtime_mode" --timeout=300'
   skus:
-    wh_n150:
+    wh_n150_civ2:
       timeout: 35
-    wh_n300:
+    wh_n300_civ2:
       timeout: 35
     bh_p100:
       timeout: 35
