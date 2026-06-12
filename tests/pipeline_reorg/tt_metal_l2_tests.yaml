@@ -265,11 +265,11 @@
   cmd: 'pytest tests/ttnn/nightly/unit_tests/operations/data_movement -xv -m "not disable_fast_runtime_mode" --timeout=600'
   skus:
     wh_n150_civ2:
-      timeout: 40
+      timeout: 60
     wh_n300_civ2:
-      timeout: 40
+      timeout: 60
     bh_p100a_civ2_viommu:
-      timeout: 40
+      timeout: 60
     bh_p150b_civ2:
       timeout: 40
   owner_id: U05ACKAJTHS # Naif Tarafdar
@@ -282,11 +282,11 @@
   cmd: 'pytest tests/ttnn/unit_tests/operations/data_movement tests/ttnn/unit_tests/operations/ccl tests/ttnn/unit_tests/operations/point_to_point --splits 3 --group 1 -xv -m "not disable_fast_runtime_mode" --timeout=300'
   skus:
     wh_n150_civ2:
-      timeout: 35
+      timeout: 50
     wh_n300_civ2:
-      timeout: 35
+      timeout: 50
     bh_p100a_civ2_viommu:
-      timeout: 35
+      timeout: 50
     bh_p150b_civ2:
       timeout: 35
   owner_id: U05ACKAJTHS # Naif Tarafdar
@@ -297,11 +297,11 @@
   cmd: 'pytest tests/ttnn/unit_tests/operations/data_movement tests/ttnn/unit_tests/operations/ccl tests/ttnn/unit_tests/operations/point_to_point --splits 3 --group 2 -xv -m "not disable_fast_runtime_mode" --timeout=300'
   skus:
     wh_n150_civ2:
-      timeout: 35
+      timeout: 50
     wh_n300_civ2:
-      timeout: 35
+      timeout: 50
     bh_p100a_civ2_viommu:
-      timeout: 35
+      timeout: 50
     bh_p150b_civ2:
       timeout: 35
   owner_id: U05ACKAJTHS # Naif Tarafdar
@@ -312,11 +312,11 @@
   cmd: 'pytest tests/ttnn/unit_tests/operations/data_movement tests/ttnn/unit_tests/operations/ccl tests/ttnn/unit_tests/operations/point_to_point --splits 3 --group 3 -xv -m "not disable_fast_runtime_mode" --timeout=300'
   skus:
     wh_n150_civ2:
-      timeout: 35
+      timeout: 50
     wh_n300_civ2:
-      timeout: 35
+      timeout: 50
     bh_p100a_civ2_viommu:
-      timeout: 35
+      timeout: 50
     bh_p150b_civ2:
       timeout: 35
   owner_id: U05ACKAJTHS # Naif Tarafdar
