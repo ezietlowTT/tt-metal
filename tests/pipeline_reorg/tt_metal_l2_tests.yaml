@@ -329,7 +329,7 @@
   skus:
     wh_n150_civ2:
       timeout: 20
-    wh_n300:
+    wh_n300_civ2:
       timeout: 20
     bh_p100a_civ2_viommu:
       timeout: 20
