@@ -121,19 +121,15 @@ sfpi_inline void calculate_div_int32_body(
     sfpi::vFloat mid = correction_f * b1 + MANTISSA_ALIGNMENT_OFFSET;
     sfpi::vFloat top = correction_f * b2 + MANTISSA_ALIGNMENT_OFFSET;
 
-    sfpi::vUInt tmp = sfpi::exman(low);
-    tmp += sfpi::exman(mid) << 11;
-    tmp += sfpi::exman(top) << 22;
-
-    v_if(r < 0) {
-        q -= correction;
-        r += sfpi::vInt(tmp);
-    }
-    v_else {
-        q += correction;
-        r -= sfpi::vInt(tmp);
+    sfpi::vInt tmp{sfpi::exman(low) + (sfpi::exman(mid) << 11) + (sfpi::exman(top) << 22)};
+    sfpi::vUInt cor = correction;
+    v_if(r >= 0) {
+        tmp = -tmp;
+        cor = -cor;
     }
     v_endif;
+    q -= cor;
+    r += tmp;
 
     // Since the correction might have been rounded, we may need to correct one
     // additional bit.  The (r - 1) < 0 check is required to handle r=INT_MIN.

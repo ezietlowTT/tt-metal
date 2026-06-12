@@ -57,25 +57,12 @@ sfpi_inline sfpi::vInt compute_unsigned_remainder_int32(const sfpi::vInt& a_sign
     // Compute correction * b (full 32-bit result from 24-bit multiplies)
     sfpi::vInt tmp_lo = sfpi::fractional_mul(correction, b);
     sfpi::vInt tmp_hi = sfpi::fractional_mul(correction, b, sfpi::FractionalHalf::High);
-    sfpi::vInt b_hi = b >> 23;
-    b_hi = sfpi::fractional_mul(correction, b_hi);
+    sfpi::vInt b_hi = sfpi::fractional_mul(correction, b >> 23);
     sfpi::vInt tmp = tmp_lo + ((tmp_hi + b_hi) << 23);
 
-#if 0
-    // Extract sign mask of r
-    // r_sign = 0 if r >= 0, -1 if r < 0
-    sfpi::vInt r_sign = r >> 31;
-
-    // Apply correction with sign of r
-    // If r < 0  -> r += tmp
-    // Else      -> r -= tmp
-    sfpi::vInt signed_tmp = (tmp ^ r_sign) - r_sign;
-#else
-    sfpi::vInt signed_tmp{tmp};
-    v_if(r < 0) { signed_tmp = -signed_tmp; }
+    v_if(r < 0) { tmp = -tmp; }
     v_endif;
-#endif
-    r -= signed_tmp;
+    r -= tmp;
 
     // Final adjustment to ensure r is in [0, b)
     v_if(r < 0 && (r - 1) < 0) { r += b; }

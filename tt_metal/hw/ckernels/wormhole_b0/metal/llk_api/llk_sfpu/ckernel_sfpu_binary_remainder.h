@@ -102,28 +102,10 @@ sfpi_inline sfpi::vInt compute_unsigned_remainder_int32(const sfpi::vInt& a_sign
     sfpi::vFloat mid = correction_f * b1 + MANTISSA_ALIGNMENT_OFFSET;
     sfpi::vFloat top = correction_f * b2 + MANTISSA_ALIGNMENT_OFFSET;
 
-    sfpi::vUInt tmp = sfpi::exman(low);
-    tmp += sfpi::exman(mid) << 11;
-    tmp += sfpi::exman(top) << 22;
-
-#if 0
-    // Extract sign mask of r
-    // r_sign = 0 if r >= 0, -1 if r < 0
-    sfpi::vInt r_sign = sfpi::as<sfpi::vInt>(sfpi::as<sfpi::vUInt>(r) >> 31);
-    r_sign = -r_sign;
-
-    // Apply correction with sign of r
-    // If r < 0  -> r += tmp
-    // Else      -> r -= tmp
-    sfpi::vInt signed_tmp = (tmp ^ r_sign) - r_sign;
-    // 4 insns
-#else
-    sfpi::vInt signed_tmp{tmp};
-    v_if(r < 0) { signed_tmp = -signed_tmp; }
+    sfpi::vInt tmp{sfpi::exman(low) + (sfpi::exman(mid) << 11) + (sfpi::exman(top) << 22)};
+    v_if(r < 0) { tmp = -tmp; }
     v_endif;
-    // 3 insns
-#endif
-    r -= signed_tmp;
+    r -= tmp;
 
     // Final adjustment - recompute b to reduce register pressure
     b = sfpi::abs(b_signed);
