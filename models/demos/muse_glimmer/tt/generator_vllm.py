@@ -7,11 +7,12 @@ vLLM serving adapter for Muse-Glimmer-30B (text-only, C-minimal).
 Phase 1 of doc/vllm_integration/BUILD_PLAN.md: greedy, batch-1, HOST sampling, no
 DFlash. Subclasses HybridAttentionForCausalLM to reuse get_kv_cache_spec (Muse's
 config carries text_config.layer_types). vLLM owns the paged KV cache; the adapter
-injects it into the model and drives prefill via the existing paged prefill path and
-decode via the new page-table-aware vllm_decode_forward.
+injects it into the model and reuses the OG server's chunked+packed paged paths
+(server.py _append_prompt_tokens / _packed_verify_inputs) for prefill and decode.
 
-STATUS: first implementation, not yet device-verified end-to-end through vLLM.
-Diagnostic logging is intentionally verbose to make the first bring-up informative.
+STATUS: prefill + decode forward plumbing validated on device against a reduced
+2-layer target (tests/test_vllm_adapter_smoke.py). Not yet run through the full
+vLLM server / full 52-layer accuracy path.
 """
 
 from __future__ import annotations
@@ -140,61 +141,127 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
         # Generator expects list[submesh][layer][k,v]; single submesh here.
         return [per_layer]
 
-    # --- helpers ---
-    def _page_table_tt(self, page_table):
-        pt = page_table if torch.is_tensor(page_table) else torch.as_tensor(page_table)
-        pt = pt.to(torch.int32)
-        if pt.dim() == 1:
-            pt = pt.unsqueeze(0)
+    # ============================================================================
+    # Prefill/decode reuse the OG server's chunked+packed paged paths (server.py
+    # _append_prompt_tokens / _packed_verify_inputs), minus the DFlash anchor logic.
+    # The ONLY vLLM adaptation: (1) use vLLM's block table instead of Muse's identity
+    # page table, and (2) make packed_kv_update's position_idx PHYSICAL
+    # (page_table[pos//64]*64 + pos%64) since that op is not page-table-aware — while
+    # rope_packed / cur_pos stay logical (rope lookup + page-table-aware SDPA read).
+    # ============================================================================
+    PHYS_VERIFY = 32  # PHYSICAL_VERIFY_TOKENS
+    PAGE = KV_PAGE_SIZE
+    PREFILL_CHUNK = 2048
+
+    def _page_table_tt(self, page_table_torch):
         return ttnn.from_torch(
-            pt, device=self.mesh_device, dtype=ttnn.int32,
+            page_table_torch.to(torch.int32), device=self.mesh_device, dtype=ttnn.int32,
             layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-    # --- prefill: reuse the model's paged prefill path with vLLM's block table ---
+    def _phys_pos(self, page_table_torch, logical_pos):
+        # physical flat position for a logical position under vLLM's block table.
+        blk = page_table_torch[0, logical_pos // self.PAGE].item()
+        return int(blk) * self.PAGE + (logical_pos % self.PAGE)
+
+    def _normalized_embeddings(self, model, token_ids):
+        emb = model.raw_token_embeddings(token_ids).float()
+        emb = emb * torch.rsqrt(emb.square().mean(dim=-1, keepdim=True) + model.embed_norm_eps)
+        return emb.to(torch.bfloat16)
+
+    def _packed_inputs(self, model, token_ids, current_position, page_table_torch):
+        """vLLM-adapted _packed_verify_inputs: physical write idx, logical rope/cur_pos.
+
+        The packed decode treats the PHYS_VERIFY (32) positions as 32 decode users, so
+        the SDPA page_table must have 32 rows (OG: decode_page_ids.repeat(32, 1)). Rows
+        are identical here (single sequence).
+        """
+        real_p = int(token_ids.numel())
+        P = self.PHYS_VERIFY
+        page_table_tt = self._page_table_tt(page_table_torch.repeat(P, 1))
+        emb = self._normalized_embeddings(model, token_ids.reshape(1, real_p))
+        emb = torch.nn.functional.pad(emb, (0, 0, 0, P - real_p))
+        hidden = ttnn.from_torch(emb.unsqueeze(0), device=self.mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+
+        logical = torch.arange(current_position, current_position + real_p, dtype=torch.int32)
+        # physical positions for the KV write (packed_kv_update is not page-table-aware)
+        phys = torch.zeros(1, P, dtype=torch.int32)
+        for i in range(real_p):
+            phys[0, i] = self._phys_pos(page_table_torch, current_position + i)
+        position_idx = ttnn.from_torch(phys, device=self.mesh_device, dtype=ttnn.uint32,
+                                       layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        # logical positions for rope + causal/sliding masks (SDPA read is page-table-aware)
+        logical_full = torch.zeros(1, P, dtype=torch.int32)
+        logical_full[0, :real_p] = logical
+        logical_idx = ttnn.from_torch(logical_full, device=self.mesh_device, dtype=ttnn.uint32,
+                                      layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        cur = torch.full((P,), -1, dtype=torch.int32)
+        cur[:real_p] = logical
+        cur_pos = ttnn.from_torch(cur, device=self.mesh_device, dtype=ttnn.int32,
+                                  layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        rope_packed = {}
+        for lt, (cos_c, sin_c) in model.rope_caches_2d.items():
+            cos = ttnn.unsqueeze_to_4D(ttnn.embedding(logical_idx, cos_c, layout=ttnn.TILE_LAYOUT))
+            sin = ttnn.unsqueeze_to_4D(ttnn.embedding(logical_idx, sin_c, layout=ttnn.TILE_LAYOUT))
+            rope_packed[lt] = (cos, sin)
+        packed = {
+            "p": P, "real_p": real_p, "position_idx": position_idx, "cur_pos": cur_pos,
+            "page_index": current_position // self.PAGE, "page_offset": current_position % self.PAGE,
+            "rope_packed": rope_packed, "page_table": page_table_tt, "retain_tail": False,
+        }
+        return hidden, packed
+
     def prefill_forward(self, tokens, page_table=None, kv_cache=None, start_pos=0,
                         prompt_lens=None, enable_trace=False, **kwargs):
         model = self.model[0]
-        ids = tokens if torch.is_tensor(tokens) else torch.as_tensor(tokens)
-        ids = ids.reshape(-1)
+        ids = (tokens if torch.is_tensor(tokens) else torch.as_tensor(tokens)).reshape(-1).to(torch.long)
+        pt_torch = page_table if torch.is_tensor(page_table) else torch.as_tensor(page_table)
+        if pt_torch.dim() == 1:
+            pt_torch = pt_torch.unsqueeze(0)
+        pt_tt = self._page_table_tt(pt_torch)
+        base = int(start_pos) if not torch.is_tensor(start_pos) else int(start_pos.reshape(-1)[0])
         S = int(ids.shape[0])
-        chunk_start = int(start_pos) if not torch.is_tensor(start_pos) else int(start_pos.reshape(-1)[0])
-        logger.info(f"[muse-vllm] prefill_forward S={S} chunk_start={chunk_start}")
-        hidden = model.embed_input_ids(ids.reshape(1, S))  # [1,1,S,hidden]
-        packed = {
-            "page_table": self._page_table_tt(page_table),
-            "chunk_start": chunk_start,
-            "logical_length": S,
-        }
-        logits = model(hidden, is_decode=False, packed=packed, last_token_only=True)
-        out = ttnn.to_torch(ttnn.get_device_tensors(logits)[0]).squeeze(0).float()
-        return out
+        logger.info(f"[muse-vllm] prefill_forward S={S} base_pos={base}")
 
-    # --- decode: single-token, page-table-aware, host sampling ---
+        offset = 0
+        last_logits = None
+        while offset < S:
+            position = base + offset
+            remaining = S - offset
+            needs_next = None  # set per branch
+            if position % self.PAGE == 0 and remaining >= self.PAGE:
+                chunk_len = min(self.PREFILL_CHUNK, (remaining // self.PAGE) * self.PAGE)
+                chunk_ids = ids[offset:offset + chunk_len].reshape(1, -1)
+                needs_next = offset + chunk_len == S
+                last_logits = model(
+                    model.embed_input_ids(chunk_ids), is_decode=False,
+                    packed={"page_table": pt_tt, "chunk_start": position, "logical_length": chunk_len},
+                    last_token_only=needs_next, compute_logits=needs_next,
+                )
+                offset += chunk_len
+            else:
+                until_aligned = self.PAGE - (position % self.PAGE)
+                append_len = min(self.PHYS_VERIFY, remaining, until_aligned)
+                seg_ids = ids[offset:offset + append_len]
+                hidden, packed = self._packed_inputs(model, seg_ids, position, pt_torch)
+                needs_next = offset + append_len == S
+                last_logits = model(hidden, is_decode=True, packed=packed,
+                                    last_token_only=needs_next, compute_logits=needs_next)
+                offset += append_len
+
+        out = ttnn.to_torch(ttnn.get_device_tensors(last_logits)[0]).float().reshape(-1, model.vocab_size)
+        return out[-1].unsqueeze(0)  # [1, vocab] — logits for the first generated token
+
     def decode_forward(self, tokens, start_pos, page_table=None, kv_cache=None,
                        enable_trace=False, read_from_device=True, sampling_params=None, **kwargs):
         model = self.model[0]
-        ids = tokens if torch.is_tensor(tokens) else torch.as_tensor(tokens)
-        ids = ids.reshape(-1)
-        pos = start_pos if torch.is_tensor(start_pos) else torch.as_tensor([start_pos])
-        pos = pos.reshape(-1).to(torch.int32)
+        ids = (tokens if torch.is_tensor(tokens) else torch.as_tensor(tokens)).reshape(-1).to(torch.long)
+        pos = (start_pos if torch.is_tensor(start_pos) else torch.as_tensor([start_pos])).reshape(-1)
         cur = int(pos[0].item())
-        logger.info(f"[muse-vllm] decode_forward token0={int(ids[0])} cur_pos={cur}")
-        hidden = model.embed_input_ids(ids[:1].reshape(1, 1))  # [1,1,1,hidden]
-        position_idx = ttnn.from_torch(
-            torch.tensor([[cur]], dtype=torch.int32), device=self.mesh_device,
-            dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-        cur_pos_tt = ttnn.from_torch(
-            pos[:1], device=self.mesh_device, dtype=ttnn.int32,
-            layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-        packed = {
-            "vllm_mode": True,
-            "position_idx": position_idx,
-            "cur_pos": cur_pos_tt,
-            "page_table": self._page_table_tt(page_table),
-        }
-        logits = model(hidden, is_decode=True, packed=packed, last_token_only=False)
-        out = ttnn.to_torch(ttnn.get_device_tensors(logits)[0]).squeeze(0).float()
-        return out
+        pt_torch = page_table if torch.is_tensor(page_table) else torch.as_tensor(page_table)
+        if pt_torch.dim() == 1:
+            pt_torch = pt_torch.unsqueeze(0)
+        hidden, packed = self._packed_inputs(model, ids[:1], cur, pt_torch)
+        logits = model(hidden, is_decode=True, packed=packed, last_token_only=True, compute_logits=True)
+        out = ttnn.to_torch(ttnn.get_device_tensors(logits)[0]).float().reshape(-1, model.vocab_size)
+        return out[0].unsqueeze(0)  # [1, vocab]
