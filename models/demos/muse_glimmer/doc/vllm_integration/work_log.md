@@ -4,7 +4,27 @@ Goal: serve Muse-Glimmer-30B through the Tenstorrent vLLM fork
 (`github.com/tenstorrent/vllm@dev`) + `vllm-tt-plugin`, replacing the model's
 bespoke DFlash server with the standard vLLM serving path.
 
-## Status: env up + arch registered; Phase 0 done; Phase 1 (C-minimal) scoped at code level
+## Status: Phase 1 forward plumbing VALIDATED on device (reduced 2-layer smoke passes)
+
+### Phase 1 progress (C-minimal) — prefill + decode run on the p150a
+Re-anchored on the OG server (server.py `_append_prompt_tokens` / `_packed_verify_inputs`)
+after drifting into reinvented paths. The adapter now reuses the OG chunked+packed prefill
+loop and `packed_decode_forward`; only two vLLM-specific adaptations were needed:
+1. **`packed_kv_update` is not page-table-aware** → pass it a PHYSICAL position
+   (`page_table[pos//64]*64 + pos%64`); keep `rope_packed`/`cur_pos` logical (rope lookup +
+   page-table-aware SDPA read hit the same physical block).
+2. **Packed decode treats the 32 physical-verify slots as 32 SDPA "users"** → the page table
+   must be repeated to 32 rows (OG: `decode_page_ids.repeat(PHYSICAL_VERIFY_TOKENS, 1)`),
+   else SDPA throws `cur_pos must have batch size equal to Q, got 32 and 1`.
+Validated via `tests/test_vllm_adapter_smoke.py` (reduced `MUSE_VLLM_N_LAYERS=2`): initialize
+-> allocate_kv_cache -> prefill -> decode all run and return `[1, vocab]` logits (gibberish by
+design at 2 layers). Debug lessons: clear `__pycache__` between edits (stale bytecode masked
+the real path); a hard device fault aborts the process AND dirties the device — `tt-smi -r`
+between crashing runs; `faulthandler` + fsync'd progress markers survive the abort.
+Remaining: full 52-layer accuracy, on-device sampling (C-full), then drive through the vLLM
+server (`run_vllm_server`).
+
+## (earlier) Status: env up + arch registered; Phase 0 done; Phase 1 (C-minimal) scoped at code level
 
 ### Phase 0 — DONE (V0 decisions locked)
 - **V0 known-good base** = tt-metal @ `1c1b7c9c3` + current `vllm@dev` empty build. OG
