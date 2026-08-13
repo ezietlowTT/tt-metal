@@ -8,7 +8,7 @@ import math
 import torch
 import ttnn
 
-from .decode import packed_decode_forward
+from .decode import packed_decode_forward, vllm_decode_forward
 from .kv_cache import PAGE_BLOCK_SIZE, init_kv_cache
 from .prefill import prefill_forward
 from .weights import load_attention_weights
@@ -126,6 +126,21 @@ class MuseGlimmerAttention:
             return output
         if packed is None:
             raise ValueError("Muse Glimmer decode requires a packed DFlash verification block")
+        if packed.get("vllm_mode"):
+            # vLLM single-token decode over a vLLM-owned paged cache + block table.
+            return vllm_decode_forward(
+                hidden_states,
+                cos,
+                sin,
+                self.weights,
+                cache,
+                self.config,
+                self.device,
+                packed["position_idx"],
+                packed["cur_pos"],
+                packed["page_table"],
+                packed.get("rope_packed", {}).get(self.config.layer_type),
+            )
         rope_packed = packed.get("rope_packed", {}).get(self.config.layer_type)
         output, self.pending_tail = packed_decode_forward(
             hidden_states,
