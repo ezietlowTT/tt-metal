@@ -113,6 +113,22 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
     def warmup(self, *args, **kwargs):
         return
 
+    # --- protocol shims: exist only so vLLM's is_text_generation_model() classifies
+    # this as a generative model (Muse isn't in vLLM's upstream registry, so — like
+    # Gemma4 — the class itself must present the interface). The TT runner never calls
+    # these; it drives prefill_forward / decode_forward. ---
+    def forward(self, input_ids, positions, **kwargs):  # pragma: no cover - protocol shim
+        raise NotImplementedError(
+            "MuseGlimmerForConditionalGeneration is a TT bridge; the TT runner invokes "
+            "prefill_forward / decode_forward, not forward()."
+        )
+
+    def compute_logits(self, hidden_states, **kwargs):  # pragma: no cover - protocol shim
+        raise NotImplementedError(
+            "MuseGlimmerForConditionalGeneration is a TT bridge; logits are produced on TT "
+            "and surfaced through prefill_forward / decode_forward."
+        )
+
     # --- KV cache: vLLM owns it; allocate Muse-native layout and inject into layers ---
     def allocate_kv_cache_per_layer(self, per_layer_specs):
         model = self.model[0]
