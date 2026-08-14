@@ -4,7 +4,40 @@ Goal: serve Muse-Glimmer-30B through the Tenstorrent vLLM fork
 (`github.com/tenstorrent/vllm@dev`) + `vllm-tt-plugin`, replacing the model's
 bespoke DFlash server with the standard vLLM serving path.
 
-## Status: Phase 1 forward plumbing VALIDATED on device (reduced 2-layer smoke passes)
+## Status: ✅ C-minimal SERVES THROUGH vLLM — end-to-end generation works
+
+**"The capital of France is" → " Paris and it is one of the most visited cities in the
+world. Due to"** — full 52-layer Muse-Glimmer-30B through the real vLLM v1 engine → TT
+plugin runner → adapter → host sampler (offline `LLM` API, greedy, max_num_seqs=1,
+VLLM_ENABLE_V1_MULTIPROCESSING=0).
+
+### Contract fixes that made vLLM serving work (generator_vllm.py + platform.py)
+1. **Multimodal → text-only**: Muse's config is nested multimodal; vLLM's resolver fell back
+   to `TransformersMultiModalForCausalLM` → `_processor_factory` assert. Fix (mirroring the
+   Gemma4 bridge): register the PLAIN HF arch `MuseGlimmerForConditionalGeneration` (not only
+   the TT alias) → the text-only TT class (not `SupportsMultiModal` → path stays text-only).
+2. **is_text_generation_model = True**: Muse isn't in vLLM's upstream registry, so the class
+   must satisfy `VllmModelForTextGeneration`. Added `__init__(self, *args, **kwargs)` (so
+   `_check_vllm_model_init` finds a `vllm_config` kwarg via **kwargs) + `embed_input_ids` /
+   `forward` / `compute_logits` shims (raise NotImplementedError — the runner drives
+   prefill/decode_forward instead).
+3. **Output shape**: the plugin host sampler does `tt_out[rows, -1, :]`, so prefill/
+   decode_forward return `[batch=1, seq=1, vocab]` with the REAL last-token logits.
+4. (earlier) physical write positions for `packed_kv_update`; 32-row packed decode.
+
+### Launch (offline)
+`VLLM_ENABLE_V1_MULTIPROCESSING=0` + `LLM(model=<hf dir>, block_size=64, max_num_seqs=1,
+max_model_len=512, enforce_eager=True, gpu_memory_utilization=0.55,
+additional_config={"trace_region_size": 256000000})`. vLLM requested 2049 KV blocks;
+`allocate_kv_cache_per_layer` built Muse-layout `[2049,2,64,128]` × 52 layers.
+
+### Remaining: HTTP server (thin layer over the offline path); then C-full (on-device
+sampling, traced decode, batching). Native path byte-identical — re-benchmarked "ocean"
+gen @ 40 AR tok/s, no regression.
+
+---
+
+## (historical) Phase 1 forward plumbing validated (reduced 2-layer smoke)
 
 ### Phase 1 progress (C-minimal) — prefill + decode run on the p150a
 Re-anchored on the OG server (server.py `_append_prompt_tokens` / `_packed_verify_inputs`)

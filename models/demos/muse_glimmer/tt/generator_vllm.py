@@ -31,6 +31,17 @@ from loguru import logger
 KV_PAGE_SIZE = 64
 
 
+def _dbg(msg):
+    # crash-survivable marker (survives a hard device abort that loses stdout).
+    try:
+        with open("/tmp/smoke_progress.txt", "a") as f:
+            f.write(f"[adapter] {msg}\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        pass
+
+
 def _build_muse_model(mesh_device, model_path, max_seq_len):
     """Build MuseGlimmerModel with vLLM-owned KV cache (create_kv_cache=False).
 
@@ -80,6 +91,12 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
     }
     is_multimodal = False
 
+    def __init__(self, *args, **kwargs):
+        # `*args, **kwargs` (not Generator's explicit signature) so vLLM's
+        # _check_vllm_model_init(supports_kw "vllm_config") passes and
+        # is_text_generation_model() classifies this bridge as generative.
+        super().__init__(*args, **kwargs)
+
     @classmethod
     def initialize_vllm_model(
         cls,
@@ -95,9 +112,13 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
 
         model_path = getattr(hf_config, "_name_or_path", None) or os.getenv("MUSE_TARGET_DIR")
         logger.info(f"[muse-vllm] initialize_vllm_model path={model_path} max_seq_len={max_seq_len}")
+        _dbg(f"init: start path={model_path} max_seq_len={max_seq_len}")
         model, model_args = _build_muse_model(mesh_device, model_path, max_seq_len)
+        _dbg("init: MuseGlimmerModel built")
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        _dbg("init: tokenizer loaded; constructing Generator")
         self = cls([model], [model_args], mesh_device, tokenizer=tokenizer)
+        _dbg("init: done")
         self._model_path = model_path
         self._max_seq_len = max_seq_len
         return self
@@ -117,6 +138,12 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
     # this as a generative model (Muse isn't in vLLM's upstream registry, so — like
     # Gemma4 — the class itself must present the interface). The TT runner never calls
     # these; it drives prefill_forward / decode_forward. ---
+    def embed_input_ids(self, input_ids, **kwargs):  # pragma: no cover - protocol shim
+        raise NotImplementedError(
+            "MuseGlimmerForConditionalGeneration is a TT bridge; embeddings are computed on "
+            "TT inside prefill_forward / decode_forward."
+        )
+
     def forward(self, input_ids, positions, **kwargs):  # pragma: no cover - protocol shim
         raise NotImplementedError(
             "MuseGlimmerForConditionalGeneration is a TT bridge; the TT runner invokes "
@@ -139,6 +166,7 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
         logger.info(f"[muse-vllm] allocate_kv_cache_per_layer: vLLM spec shape={first_shape} "
                     f"n_layers={len(per_layer_specs)} kv_heads={num_kv_heads} head_dim={head_dim}")
         num_blocks = int(first_shape[0])
+        _dbg(f"alloc: start specs={len(per_layer_specs)} num_blocks={num_blocks} spec0={first_shape}")
         shape = [num_blocks, num_kv_heads, KV_PAGE_SIZE, head_dim]
 
         def _alloc():
@@ -154,6 +182,7 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
             model.layers[layer_idx].self_attn.kv_cache = kv
             per_layer.append(kv)
         model.tt_kv_cache = per_layer
+        _dbg(f"alloc: done ({len(per_layer)} layers x [k,v])")
         # Generator expects list[submesh][layer][k,v]; single submesh here.
         return [per_layer]
 
@@ -266,7 +295,9 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
                 offset += append_len
 
         out = ttnn.to_torch(ttnn.get_device_tensors(last_logits)[0]).float().reshape(-1, model.vocab_size)
-        return out[-1].unsqueeze(0)  # [1, vocab] — logits for the first generated token
+        # Plugin host sampler does tt_out[rows, -1, :], so return [batch=1, seq=1, vocab]
+        # with the REAL last prompt token's logits at the (only) seq position.
+        return out[-1].reshape(1, 1, model.vocab_size)
 
     def decode_forward(self, tokens, start_pos, page_table=None, kv_cache=None,
                        enable_trace=False, read_from_device=True, sampling_params=None, **kwargs):
@@ -280,4 +311,4 @@ class MuseGlimmerForConditionalGeneration(HybridAttentionForCausalLM):
         hidden, packed = self._packed_inputs(model, ids[:1], cur, pt_torch)
         logits = model(hidden, is_decode=True, packed=packed, last_token_only=True, compute_logits=True)
         out = ttnn.to_torch(ttnn.get_device_tensors(logits)[0]).float().reshape(-1, model.vocab_size)
-        return out[0].unsqueeze(0)  # [1, vocab]
+        return out[0].reshape(1, 1, model.vocab_size)  # [batch=1, seq=1, vocab]
